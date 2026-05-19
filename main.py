@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Header, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional
 import yfinance as yf
-import requests
+from curl_cffi import requests as curl_requests
 import os
 
 # ─── App Setup ────────────────────────────────────────────────────────────────
@@ -34,19 +34,9 @@ def verify_rapidapi(x_rapidapi_proxy_secret: Optional[str] = Header(default=None
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
-def get_session() -> requests.Session:
-    """Mimic a real browser to prevent Yahoo Finance from blocking cloud server IPs."""
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-    })
-    return session
+def get_session() -> curl_requests.Session:
+    """Impersonate a real Chrome browser at the TLS level — required for cloud server IPs."""
+    return curl_requests.Session(impersonate="chrome")
 
 
 def fetch_ticker(symbol: str) -> yf.Ticker:
