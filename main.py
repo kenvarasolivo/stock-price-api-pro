@@ -34,27 +34,12 @@ def verify_rapidapi(x_rapidapi_proxy_secret: Optional[str] = Header(default=None
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
-def get_session() -> curl_requests.Session:
-    """Impersonate a real Chrome browser at the TLS level AND set the User-Agent header."""
-    session = curl_requests.Session(impersonate="chrome")
-    # Explicitly set the User-Agent so Yahoo Finance provides the necessary 'crumb' (cookie)
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    })
-    return session
-
-
 def fetch_ticker(symbol: str) -> yf.Ticker:
     symbol = symbol.upper().strip()
     ticker = yf.Ticker(symbol, session=get_session())
     
     try:
-        # 1. First, try to validate using fast_info (it doesn't always require cookies)
-        info = ticker.fast_info
-        if hasattr(info, 'last_price') and info.last_price is not None:
-            return ticker
-            
-        # 2. If fast_info fails, fallback to checking history
+        # BYPASS fast_info entirely. We use history() because it is much more stable.
         df = ticker.history(period="1d")
         if df.empty:
             raise HTTPException(status_code=404, detail=f"Ticker '{symbol}' not found or blocked by Yahoo.")
@@ -68,11 +53,6 @@ def fetch_ticker(symbol: str) -> yf.Ticker:
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
 
-@app.get("/", tags=["Health"])
-def root():
-    return {"status": "ok", "message": "Stock Price API is running. Visit /docs for usage."}
-
-
 @app.get("/quote/{symbol}", tags=["Stock Data"], dependencies=[Depends(verify_rapidapi)])
 def get_quote(symbol: str):
     """
@@ -82,23 +62,31 @@ def get_quote(symbol: str):
     **Example:** `/quote/AAPL`
     """
     ticker = fetch_ticker(symbol)
-    info = ticker.fast_info
 
+    # 1. Get the pricing data reliably using history instead of fast_info
     try:
-        current_price = info.last_price
-        previous_close = info.previous_close
+        df = ticker.history(period="2d")
+        if df.empty:
+            raise ValueError("No price data found.")
+            
+        current_price = float(df["Close"].iloc[-1])
+        # If we have 2 days of data, grab yesterday's close. Otherwise, use current.
+        previous_close = float(df["Close"].iloc[-2]) if len(df) > 1 else current_price
 
-        # Fallback: pull last close from history if fast_info is empty
-        if current_price is None:
-            df = ticker.history(period="2d")
-            if not df.empty:
-                current_price = float(df["Close"].iloc[-1])
-                previous_close = float(df["Close"].iloc[-2]) if len(df) > 1 else None
-
-        change = round(current_price - previous_close, 4) if current_price and previous_close else None
-        change_pct = round((change / previous_close) * 100, 4) if change and previous_close else None
+        change = round(current_price - previous_close, 4)
+        change_pct = round((change / previous_close) * 100, 4) if previous_close else 0.0
+        volume = int(df["Volume"].iloc[-1])
     except Exception:
-        current_price = previous_close = change = change_pct = None
+        current_price = previous_close = change = change_pct = volume = None
+
+    # 2. Safely attempt to get extra info (market cap, currency) using standard .info
+    try:
+        info = ticker.info
+        market_cap = info.get("marketCap")
+        currency = info.get("currency")
+        exchange = info.get("exchange")
+    except Exception:
+        market_cap = currency = exchange = None
 
     return {
         "symbol": symbol.upper(),
@@ -106,10 +94,10 @@ def get_quote(symbol: str):
         "previous_close": round(previous_close, 4) if previous_close else None,
         "change": change,
         "change_percent": change_pct,
-        "volume": getattr(info, "last_volume", None),
-        "market_cap": getattr(info, "market_cap", None),
-        "currency": getattr(info, "currency", None),
-        "exchange": getattr(info, "exchange", None),
+        "volume": volume,
+        "market_cap": market_cap,
+        "currency": currency,
+        "exchange": exchange,
     }
 
 
