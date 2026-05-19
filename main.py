@@ -36,15 +36,15 @@ def verify_rapidapi(x_rapidapi_proxy_secret: Optional[str] = Header(default=None
 def fetch_ticker(symbol: str) -> yf.Ticker:
     symbol = symbol.upper().strip()
     ticker = yf.Ticker(symbol)
-    # Validate symbol exists
+    # Validate by checking if history returns any data — more reliable than fast_info
     try:
-        info = ticker.fast_info
-        if not hasattr(info, "last_price") or info.last_price is None:
+        df = ticker.history(period="5d")
+        if df.empty:
             raise HTTPException(status_code=404, detail=f"Ticker '{symbol}' not found or has no data.")
     except HTTPException:
         raise
-    except Exception:
-        raise HTTPException(status_code=404, detail=f"Ticker '{symbol}' not found.")
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"Ticker '{symbol}' not found: {str(e)}")
     return ticker
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
@@ -66,24 +66,31 @@ def get_quote(symbol: str):
     info = ticker.fast_info
 
     try:
-        previous_close = info.previous_close or 0
-        current_price = info.last_price or 0
-        change = round(current_price - previous_close, 4)
-        change_pct = round((change / previous_close) * 100, 4) if previous_close else None
+        current_price = info.last_price
+        previous_close = info.previous_close
+
+        # Fallback: pull last close from history if fast_info is empty
+        if current_price is None:
+            df = ticker.history(period="2d")
+            if not df.empty:
+                current_price = float(df["Close"].iloc[-1])
+                previous_close = float(df["Close"].iloc[-2]) if len(df) > 1 else None
+
+        change = round(current_price - previous_close, 4) if current_price and previous_close else None
+        change_pct = round((change / previous_close) * 100, 4) if change and previous_close else None
     except Exception:
-        change = None
-        change_pct = None
+        current_price = previous_close = change = change_pct = None
 
     return {
         "symbol": symbol.upper(),
-        "price": round(info.last_price, 4) if info.last_price else None,
-        "previous_close": round(info.previous_close, 4) if info.previous_close else None,
+        "price": round(current_price, 4) if current_price else None,
+        "previous_close": round(previous_close, 4) if previous_close else None,
         "change": change,
         "change_percent": change_pct,
-        "volume": info.last_volume if hasattr(info, "last_volume") else None,
-        "market_cap": info.market_cap if hasattr(info, "market_cap") else None,
-        "currency": info.currency if hasattr(info, "currency") else None,
-        "exchange": info.exchange if hasattr(info, "exchange") else None,
+        "volume": getattr(info, "last_volume", None),
+        "market_cap": getattr(info, "market_cap", None),
+        "currency": getattr(info, "currency", None),
+        "exchange": getattr(info, "exchange", None),
     }
 
 
@@ -207,17 +214,20 @@ def get_movers(
         for sym in symbols:
             try:
                 t = yf.Ticker(sym)
-                fi = t.fast_info
-                prev = fi.previous_close or 0
-                curr = fi.last_price or 0
+                df = t.history(period="2d")
+                if df.empty or len(df) < 1:
+                    continue
+                curr = float(df["Close"].iloc[-1])
+                prev = float(df["Close"].iloc[-2]) if len(df) > 1 else None
                 chg_pct = round(((curr - prev) / prev) * 100, 2) if prev else None
+                vol = int(df["Volume"].iloc[-1]) if "Volume" in df.columns else None
                 results.append({
                     "symbol": sym,
                     "price": round(curr, 4),
                     "change_percent": chg_pct,
-                    "volume": fi.last_volume if hasattr(fi, "last_volume") else None,
+                    "volume": vol,
                 })
-            except Exception:
+            except Exception as e:
                 continue
 
         return {"list_type": list_type, "count": len(results), "data": results}
