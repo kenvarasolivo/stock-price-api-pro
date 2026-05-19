@@ -35,21 +35,35 @@ def verify_rapidapi(x_rapidapi_proxy_secret: Optional[str] = Header(default=None
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def get_session() -> curl_requests.Session:
-    """Impersonate a real Chrome browser at the TLS level — required for cloud server IPs."""
-    return curl_requests.Session(impersonate="chrome")
+    """Impersonate a real Chrome browser at the TLS level AND set the User-Agent header."""
+    session = curl_requests.Session(impersonate="chrome")
+    # Explicitly set the User-Agent so Yahoo Finance provides the necessary 'crumb' (cookie)
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    })
+    return session
 
 
 def fetch_ticker(symbol: str) -> yf.Ticker:
     symbol = symbol.upper().strip()
     ticker = yf.Ticker(symbol, session=get_session())
+    
     try:
-        df = ticker.history(period="5d")
+        # 1. First, try to validate using fast_info (it doesn't always require cookies)
+        info = ticker.fast_info
+        if hasattr(info, 'last_price') and info.last_price is not None:
+            return ticker
+            
+        # 2. If fast_info fails, fallback to checking history
+        df = ticker.history(period="1d")
         if df.empty:
-            raise HTTPException(status_code=404, detail=f"Ticker '{symbol}' not found or has no data.")
+            raise HTTPException(status_code=404, detail=f"Ticker '{symbol}' not found or blocked by Yahoo.")
+            
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=404, detail=f"Ticker '{symbol}' not found: {str(e)}")
+        raise HTTPException(status_code=404, detail=f"Error validating ticker '{symbol}': {str(e)}")
+        
     return ticker
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
@@ -236,3 +250,4 @@ def get_movers(
                 continue
 
         return {"list_type": list_type, "count": len(results), "data": results}
+    
